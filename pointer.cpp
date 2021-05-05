@@ -104,7 +104,7 @@ public:
       points_to;
 
   void andersen(Function *F, int depth) {
-    if (depth > 4 || !F)
+    if (depth > 5 || !F)
       return;
 
     for (auto &BB : *F) {
@@ -221,7 +221,6 @@ public:
     }
 
     for (auto &F : M) {
-        if(F.getName().str() == "BZ2_blockSort") continue;
       andersen(&F, 0);
     }
 
