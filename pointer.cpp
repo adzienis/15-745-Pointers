@@ -23,10 +23,10 @@
 #include "llvm/Support/raw_ostream.h"
 #include <set>
 #include <unordered_map>
+#include <unordered_set>
+#include <string.h>
 
 using namespace llvm;
-
-std::map<Function *, int> stats;
 
 bool sortByVal(const std::pair<Function *, int> &a,
                const std::pair<Function *, int> &b) {
@@ -75,75 +75,119 @@ std::string getShortValueName(Value *v) {
 }
 
 namespace {
+std::map<Function *, int> stats;
+
+typedef struct type {
+  bool isLoc;
+  Value *v;
+
+  bool operator==(const type &t) const { return (this->v == t.v); }
+
+} type_t;
+
+class MyHashFunction {
+public:
+  size_t operator()(const type &t) const { return (size_t)t.v; }
+};
+
+inline bool operator<(const type_t &lhs, const type_t &rhs) {
+  return lhs.v < rhs.v;
+}
+
 class FunctionInfo : public ModulePass {
 public:
   static char ID;
   FunctionInfo() : ModulePass(ID) {}
   ~FunctionInfo() {}
 
-  std::unordered_map<Value *, std::set<Value *>> points_to;
+  std::unordered_map<Value *, std::unordered_set<type_t, MyHashFunction>>
+      points_to;
 
   void andersen(Function *F, int depth) {
-    if (depth > 4)
+    if (depth > 4 || !F)
       return;
 
     for (auto &BB : *F) {
       for (auto &I : BB) {
         if (auto *SI = dyn_cast<StoreInst>(&I)) {
 
-          points_to[SI->getPointerOperand()].insert(SI->getValueOperand());
+          points_to[SI->getPointerOperand()].insert(type_t{
+              isa<AllocaInst>(SI->getValueOperand()), SI->getValueOperand()});
 
         } else if (auto *LI = dyn_cast<LoadInst>(&I)) {
-          points_to[LI->getPointerOperand()].insert(LI);
+
+          for (auto &pointee : points_to[LI->getPointerOperand()]) {
+
+            for (auto &pointe2 : points_to[pointee.v]) {
+              points_to[LI].insert(pointe2);
+            }
+          }
+
         } else if (auto *CI = dyn_cast<CallInst>(&I)) {
 
           if (!CI->getCalledFunction())
             continue;
 
-          andersen(CI->getCalledFunction(), depth + 1);
-
           auto *dop = CI->data_operands_begin();
           for (auto &op : CI->getCalledFunction()->args()) {
 
             if (isa<PointerType>(op.getType())) {
-              for (auto *pointee : points_to[&op]) {
-                points_to[dop->get()].insert(pointee);
+              for (auto &pointee : points_to[dop->get()]) {
+                points_to[&op].insert(pointee);
               }
             }
 
             dop++;
           }
 
+          andersen(CI->getCalledFunction(), depth + 1);
+
           for (auto &BBB : *CI->getCalledFunction()) {
             for (auto &II : BBB) {
               if (auto *ret = dyn_cast<ReturnInst>(&II)) {
-                if (ret->getReturnValue()) {
-                  points_to[CI].insert(ret->getReturnValue());
+                if (ret->getReturnValue() &&
+                    ret->getReturnValue()->getType()->isPointerTy()) {
+                  for (auto &pointee : points_to[ret->getReturnValue()]) {
+                    points_to[CI].insert(pointee);
+                  }
+
+                  // points_to[CI].insert(ret->getReturnValue());
                 }
               }
             }
           }
 
         } else if (auto *GEP = dyn_cast<GetElementPtrInst>(&I)) {
-          points_to[GEP].insert(GEP->getPointerOperand());
+
+          for (auto &pointee : points_to[GEP->getPointerOperand()]) {
+            points_to[GEP].insert(pointee);
+          }
+
         } else if (auto *PHI = dyn_cast<PHINode>(&I)) {
           for (auto &I : PHI->incoming_values()) {
-            points_to[PHI].insert(I.get());
+            for (auto &pointee : points_to[I]) {
+              points_to[PHI].insert(pointee);
+            }
           }
-        } else if (auto *BIT = dyn_cast<BitCastOperator>(&I)) {
-
-          for (auto &op : BIT->operands()) {
-            if (isa<PointerType>(op.get()->getType()))
-              points_to[BIT].insert(op.get());
+        } else if (auto *BIT = dyn_cast<BitCastInst>(&I)) {
+          for (auto op : BIT->operand_values()) {
+            for (auto &pointee : points_to[op]) {
+              points_to[BIT].insert(pointee);
+            }
           }
 
         } else if (auto *INT = dyn_cast<IntToPtrInst>(&I)) {
-          for (auto &op : INT->operands()) {
-            points_to[INT].insert(op.get());
+          for (auto op : INT->operand_values()) {
+            for (auto &pointee : points_to[op]) {
+              points_to[INT].insert(pointee);
+            }
           }
         } else if (auto *SEL = dyn_cast<SelectInst>(&I)) {
           for (auto &op : SEL->operands()) {
-            points_to[SEL].insert(op.get());
+            for (auto &pointee : points_to[op]) {
+
+              points_to[SEL].insert(pointee);
+            }
           }
         }
       }
@@ -160,9 +204,28 @@ public:
     CallGraph CG = CallGraph(M);
     Function *f = M.getFunction("main");
 
+    for (auto &G : M.globals()) {
+      if (G.getType()->isPointerTy() && isa<AllocaInst>(G)) {
+        points_to[&G].insert(type_t{isa<AllocaInst>(&G), &G});
+      }
+    }
+
     for (auto &F : M) {
+      for (auto &B : F) {
+        for (auto &I : B) {
+          if (I.getType()->isPointerTy()) {
+            points_to[&I].insert(type_t{true, &I});
+          }
+        }
+      }
+    }
+
+    for (auto &F : M) {
+        if(F.getName().str() == "BZ2_blockSort") continue;
       andersen(&F, 0);
     }
+
+    outs() << "here\n";
 
     int must = 0;
     int total = 0;
@@ -202,25 +265,30 @@ public:
 
       for (auto *ptr1 : ptrs) {
         for (auto *ptr2 : ptrs) {
+
+          if (points_to[ptr1].size() == 0 || points_to[ptr2].size() == 0) {
+
+            continue;
+          }
           if (ptr1 == ptr2)
             continue;
 
           int intersection = 0;
 
-          for (auto *pointees1 : points_to[ptr1]) {
-            for (auto *pointees2 : points_to[ptr2]) {
-              if (pointees1 == pointees2) {
+          for (auto &pointees1 : points_to[ptr1]) {
+            for (auto &pointees2 : points_to[ptr2]) {
+              if (pointees1.v == pointees2.v) {
                 intersection++;
                 break;
               }
             }
           }
 
-          if (intersection == points_to[ptr1].size() &&
-              intersection == points_to[ptr2].size()) {
-            mustAlias++;
-          } else if (intersection == 0) {
+          if (intersection == 0) {
             notAlias++;
+          } else if (intersection == points_to[ptr1].size() &&
+                     intersection == points_to[ptr2].size()) {
+            mustAlias++;
           } else {
             mayAlias++;
           }
@@ -234,55 +302,63 @@ public:
     printf("May: %f\n", (float)mayAlias / tote);
     printf("Must: %f\n", (float)mustAlias / tote);
 
-
     for (auto &pair : points_to) {
       int count = 0;
       if (!pair.first->getType()->isPointerTy())
         continue;
-      for (auto *pointee : pair.second) {
+      for (auto &pointee : pair.second) {
 
-        if (!pointee->getType()->isPointerTy())
+        if (!pointee.v->getType()->isPointerTy())
           continue;
+
+        continue;
 
         count++;
         auto *ptr = dyn_cast<Instruction>(pair.first);
-        auto *ptee = dyn_cast<Instruction>(pointee);
-        auto *argtee = dyn_cast<Argument>(pointee);
-
-        continue;
+        auto *ptee = dyn_cast<Instruction>(pointee.v);
+        auto *argtee = dyn_cast<Argument>(pointee.v);
 
         if (ptr && ptee) {
           outs() << getShortValueName(ptr) << "("
                  << ptr->getFunction()->getName() << ")"
                  << " -> " << getShortValueName(ptee) << "("
-                 << ptee->getFunction()->getName() << ")"
-                 << "\n";
+                 << ptee->getFunction()->getName() << ")";
         } else if (ptr && argtee) {
           outs() << getShortValueName(ptr) << "("
                  << ptr->getFunction()->getName() << ")"
                  << " -> " << getShortValueName(argtee) << "("
-                 << argtee->getParent()->getName() << ")"
-                 << "\n";
+                 << argtee->getParent()->getName() << ")";
 
         } else {
-          outs() << getShortValueName(pair.first) << "("
-                 << pair.first->getName() << ")"
-                 << " -> " << getShortValueName(pointee) << "\n";
+          if (auto *inst = dyn_cast<Instruction>(pair.first)) {
+            outs() << getShortValueName(pair.first) << "("
+                   << inst->getFunction()->getName() << ")"
+                   << " -> " << getShortValueName(pointee.v);
+          } else {
+            outs() << getShortValueName(pair.first) << "("
+                   << pair.first->getName() << ")"
+                   << " -> " << getShortValueName(pointee.v);
+          }
         }
+
+        if (pointee.isLoc) {
+          outs() << " ALLOC";
+        }
+
+        outs() << "\n";
       }
 
       if (count == 1) {
-        must++;
+        // must++;
       }
-      total++;
+      // total++;
     }
-
 
     return true;
 
-    printf("Total: %d\n", total);
-    printf("Must: %f\n", (float)must / (float)total);
-    printf("May: %f\n", 1 - (float)must / (float)total);
+    // printf("Total: %d\n", total);
+    // printf("Must: %f\n", (float)must / (float)total);
+    // printf("May: %f\n", 1 - (float)must / (float)total);
 
     return true;
   }
