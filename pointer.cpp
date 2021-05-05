@@ -21,6 +21,7 @@
 #include "llvm/IR/Value.h"
 #include "llvm/Pass.h"
 #include "llvm/Support/raw_ostream.h"
+#include <set>
 #include <unordered_map>
 
 using namespace llvm;
@@ -80,130 +81,77 @@ public:
   FunctionInfo() : ModulePass(ID) {}
   ~FunctionInfo() {}
 
-  std::unordered_map<Value *, std::vector<Value *>> points_to;
+  std::unordered_map<Value *, std::set<Value *>> points_to;
 
   void andersen(Function *F, int depth) {
-    if (depth > 9)
+    if (depth > 4)
       return;
 
     for (auto &BB : *F) {
       for (auto &I : BB) {
         if (auto *SI = dyn_cast<StoreInst>(&I)) {
-          points_to[SI->getPointerOperand()].push_back(SI->getValueOperand());
+
+          points_to[SI->getPointerOperand()].insert(SI->getValueOperand());
+
         } else if (auto *LI = dyn_cast<LoadInst>(&I)) {
-          points_to[LI->getPointerOperand()].push_back(LI);
+          points_to[LI->getPointerOperand()].insert(LI);
         } else if (auto *CI = dyn_cast<CallInst>(&I)) {
 
           if (!CI->getCalledFunction())
             continue;
 
-          for (auto &op : CI->getCalledFunction()->args()) {
-            // outs() << op.getName() << "\n";
-          }
-
-          // outs() << "ops^\n";
+          andersen(CI->getCalledFunction(), depth + 1);
 
           auto *dop = CI->data_operands_begin();
-
           for (auto &op : CI->getCalledFunction()->args()) {
 
             if (isa<PointerType>(op.getType())) {
-              points_to[dop->get()].push_back(&op);
+              for (auto *pointee : points_to[&op]) {
+                points_to[dop->get()].insert(pointee);
+              }
             }
+
+            dop++;
           }
-          andersen(CI->getCalledFunction(), depth + 1);
 
           for (auto &BBB : *CI->getCalledFunction()) {
             for (auto &II : BBB) {
               if (auto *ret = dyn_cast<ReturnInst>(&II)) {
                 if (ret->getReturnValue()) {
-                  points_to[CI].push_back(ret->getReturnValue());
+                  points_to[CI].insert(ret->getReturnValue());
                 }
               }
             }
           }
 
-          dop++;
         } else if (auto *GEP = dyn_cast<GetElementPtrInst>(&I)) {
-          points_to[GEP].push_back(GEP->getPointerOperand());
+          points_to[GEP].insert(GEP->getPointerOperand());
         } else if (auto *PHI = dyn_cast<PHINode>(&I)) {
           for (auto &I : PHI->incoming_values()) {
-            points_to[PHI].push_back(I.get());
+            points_to[PHI].insert(I.get());
           }
         } else if (auto *BIT = dyn_cast<BitCastOperator>(&I)) {
-          //
+
           for (auto &op : BIT->operands()) {
             if (isa<PointerType>(op.get()->getType()))
-              points_to[BIT].push_back(op.get());
+              points_to[BIT].insert(op.get());
           }
 
         } else if (auto *INT = dyn_cast<IntToPtrInst>(&I)) {
           for (auto &op : INT->operands()) {
-            points_to[INT].push_back(op.get());
+            points_to[INT].insert(op.get());
           }
         } else if (auto *SEL = dyn_cast<SelectInst>(&I)) {
           for (auto &op : SEL->operands()) {
-            points_to[SEL].push_back(op.get());
+            points_to[SEL].insert(op.get());
           }
         }
       }
     }
   }
 
-  void DFS(CallGraph &CG, Function *F,
-           std::set<std::pair<Function *, Function *>> visited, int depth,
-           std::vector<std::pair<int, Function *>> call_stack) {
-
-    bool isLeaf = true;
-
-    if (!F)
-      return;
-
-    for (auto &BB : *F) {
-      for (auto &I : BB) {
-        if (CallInst *FI = dyn_cast<CallInst>(&I)) {
-
-          Function *F_child = FI->getCalledFunction();
-
-          auto newStack = call_stack;
-
-          if (!FI->getDebugLoc()) {
-            continue;
-          }
-
-          newStack.push_back(
-              std::pair<int, Function *>(FI->getDebugLoc().getLine(), F_child));
-
-          // outs() << "" << F->getName() << " -> " << F_child->getName() <<
-          // "\n";
-
-          auto edge = std::pair<Function *, Function *>{F, F_child};
-
-          // limit mutually recursive functions
-          if (depth < 6) {
-
-            isLeaf = false;
-            visited.insert(edge);
-            DFS(CG, F_child, visited, depth + 1, newStack);
-          }
-        }
-      }
-    }
-
-    if (isLeaf) {
-      for (auto &pair : call_stack) {
-
-        if (!pair.second)
-          continue;
-
-        stats[pair.second]++;
-
-        // outs() << pair.second->getName() << "(" << pair.first << ")"
-        //       << " | ";
-      }
-
-      // outs() << "\n";
-    }
+  static inline bool isInterestingPointer(Value *V) {
+    return V->getType()->isPointerTy() && !isa<ConstantPointerNull>(V);
   }
 
   // Print output for each function
@@ -212,28 +160,91 @@ public:
     CallGraph CG = CallGraph(M);
     Function *f = M.getFunction("main");
 
-    andersen(f, 0);
+    for (auto &F : M) {
+      andersen(&F, 0);
+    }
 
     int must = 0;
     int total = 0;
     int total_ptrs = 0;
 
-    for(auto &F : M) {
-        for(auto& BB : F) {
-            for(auto& I : BB) {
-                if(isa<PointerType>(I.getType())){
-                    total_ptrs++;
-                }
-            }
+    for (auto &F : M) {
+
+      for (auto &BB : F) {
+        for (auto &I : BB) {
+          if (isa<PointerType>(I.getType())) {
+            total_ptrs++;
+          }
         }
+      }
     }
 
     printf("total ptrs: %d\n", total_ptrs);
 
+    int notAlias = 0;
+    int mustAlias = 0;
+    int mayAlias = 0;
+
+    for (auto &F : M) {
+      std::set<Value *> ptrs;
+
+      for (auto &I : F.args())
+        if (isInterestingPointer(&I)) // Add all pointer arguments.
+          ptrs.insert(&I);
+
+      for (auto &BB : F) {
+        for (auto &I : BB) {
+          if (isInterestingPointer(&I)) {
+            ptrs.insert(&I);
+          }
+        }
+      }
+
+      for (auto *ptr1 : ptrs) {
+        for (auto *ptr2 : ptrs) {
+          if (ptr1 == ptr2)
+            continue;
+
+          int intersection = 0;
+
+          for (auto *pointees1 : points_to[ptr1]) {
+            for (auto *pointees2 : points_to[ptr2]) {
+              if (pointees1 == pointees2) {
+                intersection++;
+                break;
+              }
+            }
+          }
+
+          if (intersection == points_to[ptr1].size() &&
+              intersection == points_to[ptr2].size()) {
+            mustAlias++;
+          } else if (intersection == 0) {
+            notAlias++;
+          } else {
+            mayAlias++;
+          }
+        }
+      }
+    }
+
+    int tote = notAlias + mustAlias + mayAlias;
+    printf("tote: %d\n", tote);
+    printf("Not: %f\n", (float)notAlias / tote);
+    printf("May: %f\n", (float)mayAlias / tote);
+    printf("Must: %f\n", (float)mustAlias / tote);
+
+
     for (auto &pair : points_to) {
-        int count = 0;
+      int count = 0;
+      if (!pair.first->getType()->isPointerTy())
+        continue;
       for (auto *pointee : pair.second) {
-          count++;
+
+        if (!pointee->getType()->isPointerTy())
+          continue;
+
+        count++;
         auto *ptr = dyn_cast<Instruction>(pair.first);
         auto *ptee = dyn_cast<Instruction>(pointee);
         auto *argtee = dyn_cast<Argument>(pointee);
@@ -260,15 +271,18 @@ public:
         }
       }
 
-      if(count == 1) {
-          must++;
+      if (count == 1) {
+        must++;
       }
       total++;
     }
 
+
+    return true;
+
     printf("Total: %d\n", total);
-    printf("Must: %f\n", (float)must/(float)total);
-    printf("May: %f\n", 1 - (float)must/(float)total);
+    printf("Must: %f\n", (float)must / (float)total);
+    printf("May: %f\n", 1 - (float)must / (float)total);
 
     return true;
   }
