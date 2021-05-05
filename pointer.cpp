@@ -110,7 +110,7 @@ public:
       points_to;
 
   void evaluate(Function *F, int depth, std::string call_string) {
-    if (depth > 2)
+    if (depth > 5)
       return;
 
     std::set<Value *> ptrs;
@@ -174,7 +174,7 @@ public:
   }
 
   void andersen(Function *F, int depth, std::string call_string) {
-    if (depth > 1 || !F) {
+    if (depth > 5 || !F) {
 
       return;
     }
@@ -198,7 +198,7 @@ public:
             }
           }
 
-        } /* else if (auto *CI = dyn_cast<CallInst>(&I)) {
+        } else if (auto *CI = dyn_cast<CallInst>(&I)) {
 
            if (!CI->getCalledFunction())
              continue;
@@ -207,8 +207,8 @@ public:
            for (auto &op : CI->getCalledFunction()->args()) {
 
              if (isa<PointerType>(op.getType())) {
-               for (auto &pointee : points_to[dop->get()]) {
-                 points_to[&op].insert(pointee);
+               for (auto &pointee : points_to[type_t{false, dop->get(), call_string}]) {
+                 points_to[type_t{false, &op, call_string}].insert(pointee);
                }
              }
 
@@ -223,8 +223,8 @@ public:
                if (auto *ret = dyn_cast<ReturnInst>(&II)) {
                  if (ret->getReturnValue() &&
                      ret->getReturnValue()->getType()->isPointerTy()) {
-                   for (auto &pointee : points_to[ret->getReturnValue()]) {
-                     points_to[CI].insert(pointee);
+                   for (auto &pointee : points_to[type_t{false, ret->getReturnValue(), call_string}]) {
+                     points_to[type_t{false, CI, call_string}].insert(pointee);
                    }
 
                    // points_to[CI].insert(ret->getReturnValue());
@@ -233,39 +233,41 @@ public:
              }
            }
 
-         } else if (auto *GEP = dyn_cast<GetElementPtrInst>(&I)) {
+         }
+        else if (auto *GEP = dyn_cast<GetElementPtrInst>(&I)) {
 
-           for (auto &pointee : points_to[GEP->getPointerOperand()]) {
-             points_to[GEP].insert(pointee);
-           }
+          for (auto &pointee : points_to[type_t{false, GEP->getPointerOperand(),
+                                                call_string}]) {
+            points_to[type_t{false, GEP, call_string}].insert(pointee);
+          }
 
-         } else if (auto *PHI = dyn_cast<PHINode>(&I)) {
-           for (auto &I : PHI->incoming_values()) {
-             for (auto &pointee : points_to[I]) {
-               points_to[PHI].insert(pointee);
-             }
-           }
-         } else if (auto *BIT = dyn_cast<BitCastInst>(&I)) {
-           for (auto op : BIT->operand_values()) {
-             for (auto &pointee : points_to[op]) {
-               points_to[BIT].insert(pointee);
-             }
-           }
+        } else if (auto *PHI = dyn_cast<PHINode>(&I)) {
+          for (auto &I : PHI->incoming_values()) {
+            for (auto &pointee : points_to[type_t{false, I, call_string}]) {
+              points_to[type_t{false, PHI, call_string}].insert(pointee);
+            }
+          }
+        } else if (auto *BIT = dyn_cast<BitCastInst>(&I)) {
+          for (auto op : BIT->operand_values()) {
+            for (auto &pointee : points_to[type_t{false, op, call_string}]) {
+              points_to[type_t{false, BIT, call_string}].insert(pointee);
+            }
+          }
 
-         } else if (auto *INT = dyn_cast<IntToPtrInst>(&I)) {
-           for (auto op : INT->operand_values()) {
-             for (auto &pointee : points_to[op]) {
-               points_to[INT].insert(pointee);
-             }
-           }
-         } else if (auto *SEL = dyn_cast<SelectInst>(&I)) {
-           for (auto &op : SEL->operands()) {
-             for (auto &pointee : points_to[op]) {
+        } else if (auto *INT = dyn_cast<IntToPtrInst>(&I)) {
+          for (auto op : INT->operand_values()) {
+            for (auto &pointee : points_to[type_t{false, op, call_string}]) {
+              points_to[type_t{false, INT, call_string}].insert(pointee);
+            }
+          }
+        } else if (auto *SEL = dyn_cast<SelectInst>(&I)) {
+          for (auto &op : SEL->operands()) {
+            for (auto &pointee : points_to[type_t{false, op, call_string}]) {
 
-               points_to[SEL].insert(pointee);
-             }
-           }
-         }*/
+              points_to[type_t{false, SEL, call_string}].insert(pointee);
+            }
+          }
+        }
       }
     }
   }
@@ -320,8 +322,10 @@ public:
 
     printf("total ptrs: %d\n", total_ptrs);
 
-    evaluate(f, 0, f->getName().str());
+    for (auto &F : M) {
 
+      evaluate(&F, 0, F.getName().str());
+    }
 
     int tote = notAlias + mustAlias + mayAlias;
     printf("tote: %d\n", tote);
